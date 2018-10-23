@@ -8,6 +8,21 @@ extern crate syn;
 
 use proc_macro::TokenStream;
 
+use std::collections::BTreeMap;
+
+fn unique_field_types(fields: &syn::FieldsNamed) -> Vec<syn::Type> {
+    let types: BTreeMap<_,_> = fields.named.iter().map(|ref f| {
+        let ty: syn::Type = match &f.ty {
+            &syn::Type::Array(ref array) => array.elem.as_ref().clone(),
+            other => other.clone()
+        };
+
+        ((quote! { #ty }).to_string(), ty)
+    }).collect();
+
+    types.into_iter().map(|(_,v)| v).collect()
+}
+
 fn impl_struct(name: &syn::Ident, fields: &syn::FieldsNamed) -> proc_macro2::TokenStream {
     let items: Vec<_> = fields.named.iter().map(|f| {
         let ident = &f.ident;
@@ -31,12 +46,20 @@ fn impl_struct(name: &syn::Ident, fields: &syn::FieldsNamed) -> proc_macro2::Tok
             }
         }
     }).collect();
-    
+
+    let field_type_bounds: Vec<_> = unique_field_types(fields).into_iter().map(|ty| {
+        quote! {
+            #ty: ::scroll::ctx::TryFromCtx<'a, C, Error=::scroll::Error>
+        }
+    }).collect();
+
     quote! {
-        impl<'a> ::scroll::ctx::TryFromCtx<'a, ::scroll::Endian> for #name where #name: 'a {
+        impl<'a, C> ::scroll::ctx::TryFromCtx<'a, C> for #name
+        where #name: 'a, C: Copy #(, #field_type_bounds)*
+        {
             type Error = ::scroll::Error;
             #[inline]
-            fn try_from_ctx(src: &'a [u8], ctx: ::scroll::Endian) -> ::scroll::export::result::Result<(Self, usize), Self::Error> {
+            fn try_from_ctx(src: &'a [u8], ctx: C) -> ::scroll::export::result::Result<(Self, usize), Self::Error> {
                 use ::scroll::Pread;
                 let offset = &mut 0;
                 let data  = #name { #(#items,)* };
@@ -89,24 +112,24 @@ fn impl_try_into_ctx(name: &syn::Ident, fields: &syn::FieldsNamed) -> proc_macro
             }
         }
     }).collect();
-    
+
+    let field_type_bounds: Vec<_> = unique_field_types(fields).into_iter().map(|ty| {
+        quote! {
+            #ty: ::scroll::ctx::TryIntoCtx<C, Error=::scroll::Error>
+        }
+    }).collect();
+
     quote! {
-        impl<'a> ::scroll::ctx::TryIntoCtx<::scroll::Endian> for &'a #name {
+        impl<'a, C> ::scroll::ctx::TryIntoCtx<C> for #name
+            where C: Copy #(, #field_type_bounds)*
+        {
             type Error = ::scroll::Error;
             #[inline]
-            fn try_into_ctx(self, dst: &mut [u8], ctx: ::scroll::Endian) -> ::scroll::export::result::Result<usize, Self::Error> {
+            fn try_into_ctx(&self, dst: &mut [u8], ctx: C) -> ::scroll::export::result::Result<usize, Self::Error> {
                 use ::scroll::Pwrite;
                 let offset = &mut 0;
                 #(#items;)*;
                 Ok(*offset)
-            }
-        }
-
-        impl ::scroll::ctx::TryIntoCtx<::scroll::Endian> for #name {
-            type Error = ::scroll::Error;
-            #[inline]
-            fn try_into_ctx(self, dst: &mut [u8], ctx: ::scroll::Endian) -> ::scroll::export::result::Result<usize, Self::Error> {
-                (&self).try_into_ctx(dst, ctx)
             }
         }
     }
@@ -159,10 +182,19 @@ fn size_with(name: &syn::Ident, fields: &syn::FieldsNamed) -> proc_macro2::Token
             }
         }
     }).collect();
+
+    let field_type_bounds: Vec<_> = unique_field_types(fields).into_iter().map(|ty| {
+        quote! {
+            #ty: ::scroll::ctx::SizeWith<C>
+        }
+    }).collect();
+
     quote! {
-        impl ::scroll::ctx::SizeWith<::scroll::Endian> for #name {
+        impl<C> ::scroll::ctx::SizeWith<C> for #name
+            where #(#field_type_bounds, )*
+        {
             #[inline]
-            fn size_with(ctx: &::scroll::Endian) -> usize {
+            fn size_with(ctx: &C) -> usize {
                 0 #(+ #items)*
             }
         }
@@ -227,10 +259,18 @@ fn impl_cread_struct(name: &syn::Ident, fields: &syn::FieldsNamed) -> proc_macro
         }
     }).collect();
 
+    let field_type_bounds: Vec<_> = unique_field_types(fields).into_iter().map(|ty| {
+        quote! {
+            #ty: ::scroll::ctx::FromCtx<C>
+        }
+    }).collect();
+
     quote! {
-        impl ::scroll::ctx::FromCtx<::scroll::Endian> for #name {
+        impl<C> ::scroll::ctx::FromCtx<C> for #name
+            where C: Copy #(, #field_type_bounds)*
+        {
             #[inline]
-            fn from_ctx(src: &[u8], ctx: ::scroll::Endian) -> Self {
+            fn from_ctx(src: &[u8], ctx: C) -> Self {
                 use ::scroll::Cread;
                 let offset = &mut 0;
                 let data = #name { #(#items,)* };
@@ -275,35 +315,36 @@ fn impl_into_ctx(name: &syn::Ident, fields: &syn::FieldsNamed) -> proc_macro2::T
                 quote! {
                     let size = ::scroll::export::mem::size_of::<#arrty>();
                     for i in 0..self.#ident.len() {
-                        dst.cwrite_with(self.#ident[i], *offset, ctx);
+                        dst.cwrite_with(&self.#ident[i], *offset, ctx);
                         *offset += size;
                     }
                 }
             },
             _ => {
                 quote! {
-                    dst.cwrite_with(self.#ident, *offset, ctx);
+                    dst.cwrite_with(&self.#ident, *offset, ctx);
                     *offset += #size;
                 }
             }
         }
     }).collect();
 
+    let field_type_bounds: Vec<_> = unique_field_types(fields).into_iter().map(|ty| {
+        quote! {
+            #ty: ::scroll::ctx::IntoCtx<C, [u8]>
+        }
+    }).collect();
+
     quote! {
-        impl<'a> ::scroll::ctx::IntoCtx<::scroll::Endian> for &'a #name {
+        impl<'a, C> ::scroll::ctx::IntoCtx<C> for #name
+            where Self: 'a, C: Copy #(, #field_type_bounds)*
+        {
             #[inline]
-            fn into_ctx(self, dst: &mut [u8], ctx: ::scroll::Endian) {
+            fn into_ctx(&self, dst: &mut [u8], ctx: C) {
                 use ::scroll::Cwrite;
                 let offset = &mut 0;
                 #(#items;)*;
                 ()
-            }
-        }
-
-        impl ::scroll::ctx::IntoCtx<::scroll::Endian> for #name {
-            #[inline]
-            fn into_ctx(self, dst: &mut [u8], ctx: ::scroll::Endian) {
-                (&self).into_ctx(dst, ctx)
             }
         }
     }
